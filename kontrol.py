@@ -1,5 +1,5 @@
-"""Ortam kontrolü (Hafta 1'de eklendi, Hafta 2'de genişletildi): Python, paketler, .env, veri,
-mock API uç noktaları, Ollama, asistan akışı ve Claude erişimi.
+"""Ortam kontrolü (Hafta 1'de eklendi, Hafta 2 ve 3'te genişletildi): Python, paketler, .env, veri,
+mock API uç noktaları, Ollama, prosedür indeksi (RAG), asistan akışı ve Claude erişimi.
 Her haftanın başında ve sonunda çalıştırın: python kontrol.py
 Her madde ✅ (tamam), ⚠️ (uyarı, devam edilebilir) veya ❌ (düzeltilmeli) olarak raporlanır.
 """
@@ -75,7 +75,7 @@ def veri_dosyalari():
     eksik = [d for d in dosyalar if not (PROJE_KOKU / d).exists()]
     if eksik:
         raise RuntimeError(f"eksik: {', '.join(eksik)} (veri için: python data/uret.py)")
-    # Her ajan kategorisinin prosedür klasörü dolu olmalı (Hafta 3'te RAG bunları okuyacak)
+    # Her ajan kategorisinin prosedür klasörü dolu olmalı (RAG bunları indeksler)
     for ad, kategori in KATEGORILER.items():
         if not list(kategori["prosedur_klasoru"].glob("*.md")):
             raise RuntimeError(f"{ad} kategorisinin prosedür klasörü boş: {kategori['prosedur_klasoru']}")
@@ -131,6 +131,33 @@ def ollama_modelleri():
     return f"{ayar('OLLAMA_MODEL')}, {ayar('EMBED_MODEL')}"
 
 
+def prosedur_indeksi():
+    """Hafta 3: indeks kurulu mu, .env'deki embedding modeliyle mi kurulmuş, dokümanlardan eski mi,
+    ve aramadaki gizlilik filtresi çalışıyor mu (ic parça asla dönmemeli)."""
+    import json
+    from datetime import datetime
+
+    from asistan.kategoriler import KATEGORILER
+    from asistan.rag.arama import ara, indeksi_yukle
+    from asistan.rag.indeksle import PARCA_DOSYASI
+
+    _, parcalar = indeksi_yukle()  # yoksa / model uyuşmuyorsa IndeksYok (kurma komutuyla birlikte)
+    # Filtre testi: iç kriterleri doğrudan soran sorgu, tüm parçalar arasından
+    for sorgu in ("limit artırma kredi notu kriterleri", "itiraz otomatik kabul eşiği risk puanı"):
+        gizli = [p["kaynak"] for p in ara(sorgu, list(KATEGORILER), k=len(parcalar)) if p["gizlilik"] != "musteri"]
+        if gizli:
+            raise RuntimeError(f"gizlilik filtresi çalışmıyor, aramada ic parça döndü: {gizli[0]}")
+    olusturma = datetime.fromisoformat(json.loads(PARCA_DOSYASI.read_text(encoding="utf-8"))["olusturma"])
+    dokumanlar = [y for k in KATEGORILER.values() for y in k["prosedur_klasoru"].glob("*.md")]
+    yeniler = [y.name for y in dokumanlar if datetime.fromtimestamp(y.stat().st_mtime) > olusturma]
+    ic_sayisi = sum(p["gizlilik"] == "ic" for p in parcalar)
+    ozet = f"{len({p['dosya'] for p in parcalar})} doküman, {len(parcalar)} parça ({ic_sayisi} ic, filtreleniyor)"
+    if yeniler or len({p["dosya"] for p in parcalar}) != len(dokumanlar):
+        raise Uyari(f"{ozet}; ama indeks dokümanlardan eski ({', '.join(yeniler) or 'doküman sayısı farklı'}) "
+                    "-> PYTHONPATH=src python -m asistan.rag.indeksle")
+    return ozet
+
+
 def yerel_model_cagrisi():
     from asistan import cevapla
 
@@ -157,6 +184,7 @@ if __name__ == "__main__":
     kontrol("Veri dosyaları", veri_dosyalari)
     kontrol("Mock API", mock_api)
     kontrol("Ollama modelleri", ollama_modelleri)
+    kontrol("Prosedür indeksi (RAG)", prosedur_indeksi)
     kontrol("Yerel model + ajan akışı", yerel_model_cagrisi)
     kontrol("Claude çağrısı", claude_cagrisi)
 

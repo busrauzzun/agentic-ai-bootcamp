@@ -20,6 +20,9 @@ from asistan.gunluk import log
 # ---------------------------------------------------------------------------
 
 _AKTIF_MUSTERI: ContextVar[str | None] = ContextVar("aktif_musteri", default=None)
+# Prosedür aramasının kapsamı (ajanın kategorileri). Müşteri no gibi o da modelden değil sistemden gelir:
+# prosedur_ara'nın "kategori" parametresi olsaydı, kandırılan model kart ajanında kredi dokümanı arayabilirdi.
+_AKTIF_KATEGORILER: ContextVar[tuple[str, ...]] = ContextVar("aktif_kategoriler", default=())
 
 
 def aktif_musteri() -> str:
@@ -31,13 +34,22 @@ def aktif_musteri() -> str:
     return musteri_no
 
 
+def aktif_kategoriler() -> list[str]:
+    """Şu an işlenen talebin kategorileri (ana kategori + varsa ikinci konu). Oturumda kategori
+    verilmediyse boş liste döner; prosedur_ara boş listeyle hiçbir şey bulmaz (güvenli taraf)."""
+    return list(_AKTIF_KATEGORILER.get())
+
+
 @contextmanager
-def musteri_oturumu(musteri_no: str):
-    """`with musteri_oturumu("M0007"): ...` bloğu içindeki tüm araç çağrıları bu müşteri için çalışır."""
+def musteri_oturumu(musteri_no: str, kategoriler: list[str] | None = None):
+    """`with musteri_oturumu("M0007", ["kart"]): ...` bloğu içindeki tüm araç çağrıları bu müşteri için
+    çalışır; prosedür araması sadece bu kategorilerin dokümanlarında yapılır."""
     jeton = _AKTIF_MUSTERI.set(musteri_no)
+    kategori_jetonu = _AKTIF_KATEGORILER.set(tuple(kategoriler or ()))
     try:
         yield
     finally:
+        _AKTIF_KATEGORILER.reset(kategori_jetonu)
         _AKTIF_MUSTERI.reset(jeton)
 
 
@@ -167,11 +179,27 @@ def prosedur_ara(sorgu: str) -> str:
     Args:
         sorgu: Aranacak konu, kısa ve anahtar kelimelerle (ör. "erken kapama ücreti").
     """
-    # Hafta 3'te FAISS ile gerçek arama gelecek; şimdilik yer tutucu.
-    return veri_olarak_etiketle("prosedur_ara", {
-        "sonuc": "Prosedür araması henüz kullanılamıyor (Hafta 3'te gelecek). "
-                 "Prosedür bilgisi gereken sorularda bilgi yetersizdir; kural, ücret veya süre uydurma.",
-    })
+    # Geç import: faiss/numpy sadece prosedür araması gerçekten çağrılınca yüklensin
+    from asistan.rag.arama import IndeksYok, ara
+
+    try:
+        # Kategoriler modelden değil oturumdan; ic dokümanlar ve kategori dışı parçalar ara() içinde elenir
+        parcalar = ara(sorgu, aktif_kategoriler())
+    except IndeksYok as e:
+        raise ApiHatasi(f"prosedür araması kullanılamıyor: {e}") from e  # akış temsilciye aktarır
+
+    log.info("prosedur_ara %r %s -> %s", sorgu, aktif_kategoriler(),
+             ", ".join(f"{p['kaynak']} {p['skor']:.2f}{'' if p['esik_ustu'] else ' (esik alti)'}" for p in parcalar))
+    ilgili = [p for p in parcalar if p["esik_ustu"]]  # eşik altı parçalar modele gitmez
+    if not ilgili:
+        return veri_olarak_etiketle("prosedur_ara", {
+            "sonuc": "İlgili prosedür bulunamadı. Bu konuda kural, ücret veya süre uydurma.",
+        })
+    return veri_olarak_etiketle("prosedur_ara", [
+        {"kaynak": p["kaynak"], "dokuman": p["dokuman"], "guncelleme_tarihi": p["guncelleme_tarihi"],
+         "metin": p["metin"]}
+        for p in ilgili
+    ])
 
 
 # ---------------------------------------------------------------------------
